@@ -5,6 +5,7 @@
 using System;
 using System.IO;
 using System.IO.Pipes;
+using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -137,7 +138,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
         private readonly int _backlog;
         private readonly string _path;
 
-        private UnixDomainSocket _socket;
+        private IpcUnixDomainSocketTransport _socket;
 
         public UnixDomainSocketServerTransport(string path, int backlog)
         {
@@ -192,8 +193,8 @@ namespace Microsoft.Diagnostics.NETCore.Client
 
         private void CreateNewSocketServer()
         {
-            _socket = new UnixDomainSocket();
-            _socket.Bind(_path);
+            _socket = new IpcUnixDomainSocketTransport(_path);
+            _socket.Bind();
             _socket.Listen(_backlog);
             _socket.LingerState.Enabled = false;
         }
