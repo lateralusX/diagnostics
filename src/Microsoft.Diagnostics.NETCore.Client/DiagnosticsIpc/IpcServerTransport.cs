@@ -2,12 +2,9 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.Diagnostics.NETCore.Client;
-using Microsoft.Diagnostics.NETCore.Client.DiagnosticsIpc;
 using System;
 using System.IO;
 using System.IO.Pipes;
-using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -25,7 +22,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    return new IpcWindowsPipeServerTransport(address, maxConnections);
+                    return new IpcWindowsNamedPipeServerTransport(address, maxConnections);
                 }
                 else
                 {
@@ -34,7 +31,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
             }
             else
             {
-                return new IpcTcpSocketServerTransport (address, maxConnections);
+                return new IpcTcpSocketServerTransport(address, maxConnections);
             }
         }
 
@@ -70,7 +67,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
         }
     }
 
-    internal sealed class IpcWindowsPipeServerTransport : IpcServerTransport
+    internal sealed class IpcWindowsNamedPipeServerTransport : IpcServerTransport
     {
         private const string PipePrefix = @"\\.\pipe\";
 
@@ -80,11 +77,11 @@ namespace Microsoft.Diagnostics.NETCore.Client
         private readonly string _pipeName;
         private readonly int _maxInstances;
 
-        public IpcWindowsPipeServerTransport(string pipeName, int maxInstances)
+        public IpcWindowsNamedPipeServerTransport(string pipeName, int maxInstances)
         {
             _maxInstances = maxInstances != MaxAllowedConnections ? maxInstances : NamedPipeServerStream.MaxAllowedServerInstances;
             _pipeName = pipeName.StartsWith(PipePrefix) ? pipeName.Substring(PipePrefix.Length) : pipeName;
-            CreateNewPipeServer();
+            _stream = CreateNewNamedPipeServer(_pipeName, _maxInstances);
         }
 
         protected override void Dispose(bool disposing)
@@ -116,20 +113,15 @@ namespace Microsoft.Diagnostics.NETCore.Client
             {
                 if (!_cancellation.IsCancellationRequested)
                 {
-                    CreateNewPipeServer();
+                    _stream = CreateNewNamedPipeServer(_pipeName, _maxInstances);
                 }
             }
             return connectedStream;
         }
 
-        private void CreateNewPipeServer()
+        private NamedPipeServerStream CreateNewNamedPipeServer(string pipeName, int maxInstances)
         {
-            _stream = new NamedPipeServerStream(
-                _pipeName,
-                PipeDirection.InOut,
-                _maxInstances,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
+            return new NamedPipeServerStream(pipeName, PipeDirection.InOut, maxInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         }
     }
 
@@ -208,12 +200,9 @@ namespace Microsoft.Diagnostics.NETCore.Client
             int hostPort;
 
             if (!IpcTcpSocketTransport.TryParseIPAddress(address, out hostAddress, out hostPort))
-                throw new ArgumentException(string.Format("Could not parse {0} into host and port arguments", address));
+                throw new ArgumentException(string.Format("Could not parse {0} into host, port", address));
 
-            var socket = IpcTcpSocketTransport.Create (hostAddress, hostPort);
-
-            if (IpcTcpSocketTransport.UseDualMode(socket, hostAddress))
-                socket.DualMode = true;
+            var socket = IpcTcpSocketTransport.Create(hostAddress, hostPort);
 
             socket.Bind();
             socket.Listen(backlog);
