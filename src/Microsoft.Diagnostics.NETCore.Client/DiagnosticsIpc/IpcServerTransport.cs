@@ -16,9 +16,9 @@ namespace Microsoft.Diagnostics.NETCore.Client
     {
         private bool _disposed;
 
-        public static IpcServerTransport Create(string address, int maxConnections)
+        public static IpcServerTransport Create(string address, int maxConnections, CancellationToken token, bool enableTcpIpProtocol)
         {
-            if (!IpcTcpSocketTransport.TryParseIPAddress(address))
+            if (!enableTcpIpProtocol || !IpcTcpSocketTransport.TryParseIPAddress(address))
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
