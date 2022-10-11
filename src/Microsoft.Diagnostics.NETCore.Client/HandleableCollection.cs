@@ -70,22 +70,37 @@ namespace Microsoft.Diagnostics.NETCore.Client
         /// </remarks>
         public void Dispose()
         {
+            T[] itemsToDispose;
+            Tuple<TaskCompletionSource<T>, Handler>[] handlersToDispose;
+
             lock (_items)
             {
                 if (_disposed)
                 {
                     return;
                 }
+
+                itemsToDispose = _items.ToArray();
+                _items.Clear();
+
+                handlersToDispose = _handlers.ToArray();
+                _handlers.Clear();
+
                 _disposed = true;
             }
 
-            RemoveAndDisposeItems();
+            foreach (var item in itemsToDispose)
+            {
+                if (item is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            }
 
-            foreach (Tuple<TaskCompletionSource<T>, Handler> tuple in _handlers)
+            foreach (var tuple in handlersToDispose)
             {
                 tuple.Item1.TrySetException(new ObjectDisposedException(nameof(HandleableCollection<T>)));
             }
-            _handlers.Clear();
         }
 
         /// <summary>

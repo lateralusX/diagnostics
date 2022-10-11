@@ -187,6 +187,45 @@ namespace Microsoft.Diagnostics.NETCore.Client
             }
         }
 
+        private void AddStream(IpcAdvertise advertise, Stream stream)
+        {
+            try
+            {
+                Guid runtimeCookie = advertise.RuntimeInstanceCookie;
+                int pid = unchecked((int)advertise.ProcessId);
+
+                HandleableCollection<Stream> streamCollection = null;
+
+                while (true)
+                {
+                    if (_streamCollections.TryGetValue(runtimeCookie, out streamCollection))
+                    {
+                        streamCollection.ClearItems();
+                        streamCollection.Add(stream);
+                        if (_streamCollections.TryUpdate(runtimeCookie, streamCollection, streamCollection))
+                            return;
+                    }
+                    else
+                    {
+                        streamCollection = new HandleableCollection<Stream>();
+                        streamCollection.Add(stream);
+                        if (_streamCollections.TryAdd(runtimeCookie, streamCollection))
+                        {
+                            ServerIpcEndpoint endpoint = new ServerIpcEndpoint(this, runtimeCookie);
+                            _endpointInfos.Add(new IpcEndpointInfo(endpoint, pid, runtimeCookie));
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // The stream collection could be disposed by RemoveConnection which would cause an
+                // ObjectDisposedException to be thrown if trying to clear/add the stream.
+                stream.Dispose();
+            }
+        }
+
         /// <summary>
         /// Listens at the address for new connections.
         /// </summary>
@@ -238,37 +277,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
 
                 if (null != advertise)
                 {
-                    Guid runtimeCookie = advertise.RuntimeInstanceCookie;
-                    int pid = unchecked((int)advertise.ProcessId);
-
-                    // The valueFactory parameter of the GetOrAdd overload that uses Func<TKey, TValue> valueFactory
-                    // does not execute the factory under a lock thus it is not thread-safe. Create the collection and
-                    // use a thread-safe version of GetOrAdd; use equality comparison on the result to determine if
-                    // the new collection was added to the dictionary or if an existing one was returned.
-                    var newStreamCollection = new HandleableCollection<Stream>();
-                    var streamCollection = _streamCollections.GetOrAdd(runtimeCookie, newStreamCollection);
-
-                    try
-                    {
-                        streamCollection.ClearItems();
-                        streamCollection.Add(stream);
-
-                        if (newStreamCollection == streamCollection)
-                        {
-                            ServerIpcEndpoint endpoint = new ServerIpcEndpoint(this, runtimeCookie);
-                            _endpointInfos.Add(new IpcEndpointInfo(endpoint, pid, runtimeCookie));
-                        }
-                        else
-                        {
-                            newStreamCollection.Dispose();
-                        }
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        // The stream collection could be disposed by RemoveConnection which would cause an
-                        // ObjectDisposedException to be thrown if trying to clear/add the stream.
-                        stream.Dispose();
-                    }
+                    AddStream(advertise, stream);
                 }
             }
         }
