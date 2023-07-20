@@ -275,7 +275,7 @@ namespace Microsoft.Diagnostics.NETCore.Client
                 throw new ServerNotAvailableException($"Process {_pid} seems to be elevated.");
             }
 
-            if (!TryGetDefaultAddress(_pid, false, out string transportName))
+            if (!TryGetDefaultAddress(_pid, out string transportName))
             {
                 throw new ServerNotAvailableException($"Process {_pid} not running compatible .NET runtime.");
             }
@@ -283,35 +283,59 @@ namespace Microsoft.Diagnostics.NETCore.Client
             return transportName;
         }
 
-        private static bool TryGetDefaultAddress(int pid, bool dsRouter, out string defaultAddress)
+        private static bool TryGetDefaultAddress(int pid, out string defaultAddress)
         {
             defaultAddress = null;
 
-            string addressPrefix = !dsRouter ? "dotnet-diagnostic" : "dotnet-dsrouter";
+            string dsrouterFilePath = "";
+            string diagnosticFilePath = "";
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                defaultAddress = $"{addressPrefix}-{pid}";
+                diagnosticFilePath = Path.Combine(IpcRootPath + $"dotnet-diagnostic-{pid}");
+                dsrouterFilePath = Path.Combine(IpcRootPath, $"dotnet-diagnostic-dsrouter-{pid}");
             }
             else
             {
                 try
                 {
-                    defaultAddress = Directory.GetFiles(IpcRootPath, $"{addressPrefix}-{pid}-*-socket") // Try best match.
+                    diagnosticFilePath = Directory.GetFiles(IpcRootPath, $"dotnet-diagnostic-{pid}-*-socket")
                         .OrderByDescending(f => new FileInfo(f).LastWriteTime)
-                        .FirstOrDefault();
+                    .FirstOrDefault();
+
+                    dsrouterFilePath = Directory.GetFiles(IpcRootPath, $"dotnet-diagnostic-dsrouter-{pid}-*-socket")
+                        .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                    .FirstOrDefault();
                 }
                 catch (InvalidOperationException)
                 {
                 }
             }
 
-            return !string.IsNullOrEmpty(defaultAddress);
-        }
+            FileInfo diagnosticFile = new(diagnosticFilePath);
+            FileInfo dsrouterFile = new(dsrouterFilePath);
 
-        public static string GetDefaultAddressForProcessId(int pid, bool dsRouter)
-        {
-            return TryGetDefaultAddress(pid, dsRouter, out string defaultAddress) ? defaultAddress : string.Empty;
+            if (diagnosticFile.Exists && !dsrouterFile.Exists)
+            {
+                defaultAddress = diagnosticFile.FullName;
+            }
+            else if (dsrouterFile.Exists && !diagnosticFile.Exists)
+            {
+                defaultAddress = dsrouterFile.FullName;
+            }
+            else
+            {
+                if (dsrouterFile.LastWriteTime < diagnosticFile.LastWriteTime)
+                {
+                    defaultAddress = diagnosticFile.FullName;
+                }
+                else
+                {
+                    defaultAddress = dsrouterFile.FullName;
+                }
+            }
+
+            return !string.IsNullOrEmpty(defaultAddress);
         }
 
         public override bool Equals(object obj)
