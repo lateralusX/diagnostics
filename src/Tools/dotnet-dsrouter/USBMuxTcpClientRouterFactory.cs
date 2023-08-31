@@ -12,6 +12,36 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 {
+
+    //TODO:
+    // Include wifi connections, needs new callback API to include both usb and wifi.
+    // using (var options = new NSMutableDictionary ()) {
+    // if (IncludePairedDevices)
+    //      options.Add((NSString) "NotificationOptionSearchForPairedDevices", NSNumber.FromBoolean (true));
+    // if (IncludeWirelessDevices)
+    //      options.Add((NSString) "NotificationOptionSearchForWiFiPairableDevices", NSNumber.FromBoolean (true));
+    // ret = MobileDevice.AMDeviceNotificationSubscribeWithOptions(callback, 0, 0, 0, out context, options.Handle);
+    // if (ret != 0)
+    //  throw new MobileDeviceException(ret, "AMDeviceNotificationSubscribe");
+    // }
+    // Check if device has been paired
+    // [DllImport(MobileDeviceLibrary)]
+    // public static extern uint AMDeviceIsPaired(IntPtr device);
+    // Get device identifier, return CFString.FromHandle (AMDeviceCopyDeviceIdentifier (device));
+    // Get UUID using AMDeviceCopyValue and "UniqueDeviceID"
+    // Get Name using AMDeviceCopyValue and "DeviceName"
+    // Add ability to pass in the deviceName to match. compare with device name.
+    // Dump info about discovered devices.
+    // AMDeviceConnect(device);
+    // assert(AMDeviceIsPaired(device));
+    // check_error(AMDeviceValidatePairing(device));
+    // check_error(AMDeviceStartSession(device));
+    // ...
+    // check_error(AMDeviceStopSession(device));
+    // check_error(AMDeviceDisconnect(device));
+
+    //https://github.com/EpicGames/UnrealEngine/blob/463443057fb97f1af0d2951705324ce8818d2a55/Engine/Extras/ThirdPartyNotUE/ios-deploy/src/ios-deploy/ios-deploy.m
+
     internal static class USBMuxInterop
     {
         public const string CoreFoundationLibrary = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
