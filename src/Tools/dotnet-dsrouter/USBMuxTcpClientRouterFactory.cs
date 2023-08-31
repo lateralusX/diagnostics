@@ -44,9 +44,10 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 
     internal static class USBMuxInterop
     {
-        public const string CoreFoundationLibrary = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
-        public const string MobileDeviceLibrary = "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice";
-        public const string LibC = "libc";
+        public const string CoreFoundationLibraryPath = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+        public const string MobileDeviceLibraryPath = "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice";
+        public const string CLibraryPath = "/usr/lib/libc";
+        public const string SystemLibraryPath = "/usr/lib/libSystem";
 
         public const int EINTR = 4;
 
@@ -72,47 +73,115 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 
         public delegate void DeviceNotificationDelegate(ref AMDeviceNotificationCallbackInfo info);
 
+        public static class CoreFoundation
+        {
+            private static readonly IntPtr Handle = dlopen(CoreFoundationLibraryPath, 0);
+            public static readonly IntPtr kCFTypeDictionaryKeyCallBacks = dlsym(Handle, "kCFTypeDictionaryKeyCallBacks");
+            public static readonly IntPtr kCFTypeDictionaryValueCallBacks = dlsym(Handle, "kCFTypeDictionaryValueCallBacks");
+            public static readonly IntPtr kCFBooleanTrue = dlsym(Handle, "kCFBooleanTrue");
+            public static readonly IntPtr kCFBooleanFalse = dlsym(Handle, "kCFBooleanFalse");
+        }
+
         #region MobileDeviceLibrary
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceNotificationSubscribe(DeviceNotificationDelegate callback, uint unused0, uint unused1, uint unused2, out IntPtr context);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
+        public static extern uint AMDeviceNotificationSubscribeWithOptions(DeviceNotificationDelegate callback, uint unused0, uint unused1, uint dn_unknown3, out IntPtr context, IntPtr options);
+
+
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceNotificationUnsubscribe(IntPtr context);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceConnect(IntPtr device);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceDisconnect(IntPtr device);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceGetConnectionID(IntPtr device);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern int AMDeviceGetInterfaceType(IntPtr device);
 
-        [DllImport(MobileDeviceLibrary)]
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint USBMuxConnectByPort(uint connection, ushort port, out int socketHandle);
         #endregion
         #region CoreFoundationLibrary
-        [DllImport(CoreFoundationLibrary)]
+        [DllImport(CoreFoundationLibraryPath)]
         public static extern void CFRunLoopRun();
 
-        [DllImport(CoreFoundationLibrary)]
+        [DllImport(CoreFoundationLibraryPath)]
         public static extern void CFRunLoopStop(IntPtr runLoop);
 
-        [DllImport(CoreFoundationLibrary)]
+        [DllImport(CoreFoundationLibraryPath)]
         public static extern IntPtr CFRunLoopGetCurrent();
+
+        [DllImport(CoreFoundationLibraryPath)]
+        public static extern IntPtr CFDictionaryCreate(IntPtr allocator, IntPtr[] keys, IntPtr[] vals, nint len, IntPtr keyCallbacks, IntPtr valCallbacks);
+
+        [DllImport(CoreFoundationLibraryPath)]
+        public static extern void CFRelease(IntPtr obj);
+
+        [DllImport(CoreFoundationLibraryPath)]
+        private static extern IntPtr CFStringCreateWithCharacters(IntPtr allocator, IntPtr str, nint count);
+
+        public static IntPtr CFStringCreateWithCharacters(IntPtr allocator, string value)
+        {
+            ReadOnlySpan<char> buffer = value.AsSpan();
+            unsafe
+            {
+                fixed (char* bufferPtr = buffer)
+                {
+                    return CFStringCreateWithCharacters(allocator, (IntPtr)bufferPtr, value.Length);
+                }
+            }
+        }
         #endregion
         #region LibC
-        [DllImport(LibC, SetLastError = true)]
+        [DllImport(CLibraryPath, SetLastError = true)]
         public static extern unsafe int send(int handle, byte* buffer, IntPtr length, int flags);
 
-        [DllImport(LibC, SetLastError = true)]
+        [DllImport(CLibraryPath, SetLastError = true)]
         public static extern unsafe int recv(int handle, byte* buffer, IntPtr length, int flags);
 
-        [DllImport(LibC, SetLastError = true)]
+        [DllImport(CLibraryPath, SetLastError = true)]
         public static extern int close(int handle);
+        #endregion
+        #region SystemLibrary
+        [DllImport(SystemLibraryPath)]
+        public static extern int dlclose(IntPtr handle);
+
+        [DllImport(SystemLibraryPath)]
+        private static extern IntPtr dlopen(IntPtr path, int mode);
+
+        public static IntPtr dlopen(string path, int mode)
+        {
+            ReadOnlySpan<char> buffer = path.AsSpan();
+            unsafe
+            {
+                fixed (char* bufferPtr = buffer)
+                {
+                    return dlopen((IntPtr)bufferPtr, mode);
+                }
+            }
+        }
+
+        [DllImport(SystemLibraryPath)]
+        private static extern IntPtr dlsym(IntPtr handle, IntPtr symbol);
+
+        public static IntPtr dlsym(IntPtr handle, string symbol)
+        {
+            ReadOnlySpan<char> buffer = symbol.AsSpan();
+            unsafe
+            {
+                fixed (char* bufferPtr = buffer)
+                {
+                    return dlsym(handle, (IntPtr)bufferPtr);
+                }
+            }
+        }
         #endregion
     }
 
@@ -490,6 +559,9 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
         private void AMDeviceNotificationSubscribeLoop()
         {
             IntPtr context = IntPtr.Zero;
+            IntPtr usbDeviceCFStringRef = IntPtr.Zero;
+            IntPtr wifiDeviceCFStringRef = IntPtr.Zero;
+            IntPtr subscribeOptions = IntPtr.Zero;
 
             try
             {
@@ -506,7 +578,18 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 
                 _logger?.LogTrace($"Calling AMDeviceNotificationSubscribe.");
 
-                if (USBMuxInterop.AMDeviceNotificationSubscribe(AMDeviceNotificationCallback, 0, 0, 0, out context) != 0)
+                usbDeviceCFStringRef = USBMuxInterop.CFStringCreateWithCharacters(IntPtr.Zero, "NotificationOptionSearchForPairedDevices");
+                wifiDeviceCFStringRef = USBMuxInterop.CFStringCreateWithCharacters(IntPtr.Zero, "NotificationOptionSearchForWiFiPairableDevices");
+
+                subscribeOptions = USBMuxInterop.CFDictionaryCreate(
+                    IntPtr.Zero,
+                    new IntPtr[] { usbDeviceCFStringRef, wifiDeviceCFStringRef },
+                    new IntPtr[] { USBMuxInterop.CoreFoundation.kCFBooleanTrue, USBMuxInterop.CoreFoundation.kCFBooleanTrue },
+                    2,
+                    USBMuxInterop.CoreFoundation.kCFTypeDictionaryKeyCallBacks,
+                    USBMuxInterop.CoreFoundation.kCFTypeDictionaryValueCallBacks);
+
+                if (USBMuxInterop.AMDeviceNotificationSubscribeWithOptions(AMDeviceNotificationCallback, 0, 0, 0, out context, subscribeOptions) != 0)
                 {
                     _logger?.LogError($"Failed AMDeviceNotificationSubscribe call.");
                     throw new Exception("Failed AMDeviceNotificationSubscribe call.");
@@ -536,6 +619,21 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
                 {
                     _logger?.LogTrace($"Calling AMDeviceNotificationUnsubscribe.");
                     USBMuxInterop.AMDeviceNotificationUnsubscribe(context);
+                }
+
+                if (subscribeOptions != IntPtr.Zero)
+                {
+                    USBMuxInterop.CFRelease(subscribeOptions);
+                }
+
+                if (usbDeviceCFStringRef != IntPtr.Zero)
+                {
+                    USBMuxInterop.CFRelease(usbDeviceCFStringRef);
+                }
+
+                if (wifiDeviceCFStringRef != IntPtr.Zero)
+                {
+                    USBMuxInterop.CFRelease(wifiDeviceCFStringRef);
                 }
             }
         }
