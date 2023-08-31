@@ -2,9 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Buffers;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Diagnostics.NETCore.Client;
@@ -51,6 +53,18 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 
         public const int EINTR = 4;
 
+        public struct CFRange
+        {
+            public nint location;
+            public nint length;
+        };
+
+        public enum InterfaceType : uint
+        {
+            Usb = 1,
+            Wifi = 2,
+        }
+
         public enum AMDeviceNotificationMessage : uint
         {
             None = 0,
@@ -84,6 +98,45 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 
         #region MobileDeviceLibrary
         [DllImport(MobileDeviceLibraryPath)]
+        private static extern IntPtr AMDeviceCopyValue(IntPtr device, IntPtr unknown, IntPtr key);
+
+        public static string AMDeviceGetValue(IntPtr device, string key)
+        {
+            IntPtr keyCFStringRef = IntPtr.Zero;
+            IntPtr valueCFStringRef = IntPtr.Zero;
+
+            try
+            {
+                keyCFStringRef = CFStringCreateWithCharacters(IntPtr.Zero, key);
+                if (keyCFStringRef == IntPtr.Zero)
+                {
+                    return string.Empty;
+                }
+
+                valueCFStringRef = AMDeviceCopyValue(device, IntPtr.Zero, keyCFStringRef);
+                if (valueCFStringRef == IntPtr.Zero)
+                {
+                    return string.Empty;
+                }
+
+                return CFStringGetCharacters(valueCFStringRef);
+            }
+            finally
+            {
+                if (valueCFStringRef != IntPtr.Zero)
+                {
+                    CFRelease(valueCFStringRef);
+                }
+
+                if (keyCFStringRef != IntPtr.Zero)
+                {
+                    CFRelease(keyCFStringRef);
+                }
+            }
+
+        }
+
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceNotificationSubscribe(DeviceNotificationDelegate callback, uint unused0, uint unused1, uint unused2, out IntPtr context);
 
         [DllImport(MobileDeviceLibraryPath)]
@@ -100,10 +153,42 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
         public static extern uint AMDeviceDisconnect(IntPtr device);
 
         [DllImport(MobileDeviceLibraryPath)]
+        public static extern uint AMDeviceIsPaired(IntPtr device);
+
+        [DllImport(MobileDeviceLibraryPath)]
+        public static extern uint AMDeviceValidatePairing(IntPtr device);
+
+        [DllImport(MobileDeviceLibraryPath)]
         public static extern uint AMDeviceGetConnectionID(IntPtr device);
 
         [DllImport(MobileDeviceLibraryPath)]
         public static extern int AMDeviceGetInterfaceType(IntPtr device);
+
+        [DllImport(MobileDeviceLibraryPath)]
+        private static extern IntPtr AMDeviceCopyDeviceIdentifier(IntPtr device);
+
+        public static string AMDeviceGetDeviceIdentifier(IntPtr device)
+        {
+            IntPtr value = IntPtr.Zero;
+
+            try
+            {
+                value = AMDeviceCopyDeviceIdentifier(device);
+                if (value == IntPtr.Zero)
+                {
+                    return string.Empty;
+                }
+
+                return CFStringGetCharacters(value);
+            }
+            finally
+            {
+                if (value != IntPtr.Zero)
+                {
+                    CFRelease(value);
+                }
+            }
+        }
 
         [DllImport(MobileDeviceLibraryPath)]
         public static extern uint USBMuxConnectByPort(uint connection, ushort port, out int socketHandle);
@@ -124,7 +209,7 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
         [DllImport(CoreFoundationLibraryPath)]
         public static extern void CFRelease(IntPtr obj);
 
-        [DllImport(CoreFoundationLibraryPath)]
+        [DllImport(CoreFoundationLibraryPath, CharSet = CharSet.Unicode)]
         private static extern IntPtr CFStringCreateWithCharacters(IntPtr allocator, IntPtr str, nint count);
 
         public static IntPtr CFStringCreateWithCharacters(IntPtr allocator, string value)
@@ -136,6 +221,34 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
                 {
                     return CFStringCreateWithCharacters(allocator, (IntPtr)bufferPtr, value.Length);
                 }
+            }
+        }
+
+        [DllImport(CoreFoundationLibraryPath, CharSet = CharSet.Unicode)]
+        public static extern nint CFStringGetLength(IntPtr handle);
+
+        [DllImport(CoreFoundationLibraryPath, CharSet = CharSet.Unicode)]
+        private static extern void CFStringGetCharacters(IntPtr handle, CFRange range, IntPtr buffer);
+
+        public static string CFStringGetCharacters(IntPtr handle)
+        {
+            int len = (int)CFStringGetLength(handle);
+            if (len == 0)
+            {
+                return string.Empty;
+            }
+
+            using (IMemoryOwner<char> buffer = MemoryPool<char>.Shared.Rent(len))
+            {
+                unsafe
+                {
+                    fixed (char* bufferPtr = buffer.Memory.Span)
+                    {
+                        CFStringGetCharacters(handle, new CFRange { location = 0, length = len }, (IntPtr)bufferPtr);
+                    };
+                }
+
+                return new string(buffer.Memory.Span);
             }
         }
         #endregion
@@ -477,19 +590,42 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
             return handle;
         }
 
-        private bool ConnectDevice(IntPtr newDevice)
+        private bool ConnectDevice(IntPtr newDevice, string pattern)
         {
             if (_device != IntPtr.Zero)
             {
                 return false;
             }
 
-            _device = newDevice;
-            if (USBMuxInterop.AMDeviceConnect(_device) == 0)
+            if (USBMuxInterop.AMDeviceConnect(newDevice) == 0)
             {
-                _deviceConnectionID = USBMuxInterop.AMDeviceGetConnectionID(_device);
-                _logger?.LogInformation($"Successfully connected new device, id={_deviceConnectionID}.");
-                return true;
+                Regex deviceNameRegex = !string.IsNullOrEmpty(pattern) ? new Regex(pattern) : null;
+                string deviceName = USBMuxInterop.AMDeviceGetValue(newDevice, "DeviceName");
+                string deviceUUID = USBMuxInterop.AMDeviceGetValue(newDevice, "UniqueDeviceID");
+                string deviceID = USBMuxInterop.AMDeviceGetDeviceIdentifier(newDevice);
+
+                if (deviceNameRegex == null || deviceNameRegex.IsMatch(deviceName) || deviceNameRegex.IsMatch(deviceUUID) || deviceNameRegex.IsMatch(deviceID))
+                {
+                    _logger?.LogDebug($"Discovered new device, name={deviceName}, uuid={deviceUUID}, id={deviceID}");
+                    if (USBMuxInterop.AMDeviceIsPaired(newDevice) == 1 && USBMuxInterop.AMDeviceValidatePairing(newDevice) == 0)
+                    {
+                        _deviceConnectionID = USBMuxInterop.AMDeviceGetConnectionID(newDevice);
+                        _logger?.LogInformation($"Successfully connected new device, name={deviceName}, uuid={deviceUUID}, id={deviceID}, connection-id={_deviceConnectionID}.");
+                        _device = newDevice;
+                        return true;
+                    }
+                    else
+                    {
+                        _logger?.LogError($"Failed connecting new device, name={deviceName}, uuid={deviceUUID}, id={deviceID}. Device doesn't have a valid pairing.");
+                    }
+                }
+                else
+                {
+                    _logger?.LogDebug($"Skipping new device, name={deviceName}, uuid={deviceUUID}, id={deviceID}. Device name|uuid|id didn't match pattern \"{pattern}\".");
+                }
+
+                USBMuxInterop.AMDeviceDisconnect(newDevice);
+                return false;
             }
             else
             {
@@ -523,21 +659,22 @@ namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
             {
                 lock (this)
                 {
-                    int interfaceType = USBMuxInterop.AMDeviceGetInterfaceType(info.am_device);
+                    USBMuxInterop.InterfaceType interfaceType = (USBMuxInterop.InterfaceType)USBMuxInterop.AMDeviceGetInterfaceType(info.am_device);
+                    bool supportedInterfaceType = interfaceType == USBMuxInterop.InterfaceType.Usb || interfaceType == USBMuxInterop.InterfaceType.Wifi;
                     switch (info.message)
                     {
                         case USBMuxInterop.AMDeviceNotificationMessage.Connected:
-                            if (interfaceType == 1 && _device == IntPtr.Zero)
+                            if (supportedInterfaceType && _device == IntPtr.Zero)
                             {
                                 ConnectDevice(info.am_device);
                             }
-                            else if (interfaceType == 1 && _device != IntPtr.Zero)
+                            else if (supportedInterfaceType && _device != IntPtr.Zero)
                             {
                                 _logger?.LogInformation($"Discovered new device, but one is already connected, ignoring new device.");
                             }
-                            else if (interfaceType == 0)
+                            else if (!supportedInterfaceType)
                             {
-                                _logger?.LogInformation($"Discovered new device not connected over USB, ignoring new device.");
+                                _logger?.LogInformation($"Discovered new device not connected over USB/Wifi, ignoring new device.");
                             }
                             break;
                         case USBMuxInterop.AMDeviceNotificationMessage.Disconnected:
