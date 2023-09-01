@@ -15,34 +15,16 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.Diagnostics.Tools.DiagnosticsServerRouter
 {
 
-    //TODO:
-    // Include wifi connections, needs new callback API to include both usb and wifi.
-    // using (var options = new NSMutableDictionary ()) {
-    // if (IncludePairedDevices)
-    //      options.Add((NSString) "NotificationOptionSearchForPairedDevices", NSNumber.FromBoolean (true));
-    // if (IncludeWirelessDevices)
-    //      options.Add((NSString) "NotificationOptionSearchForWiFiPairableDevices", NSNumber.FromBoolean (true));
-    // ret = MobileDevice.AMDeviceNotificationSubscribeWithOptions(callback, 0, 0, 0, out context, options.Handle);
-    // if (ret != 0)
-    //  throw new MobileDeviceException(ret, "AMDeviceNotificationSubscribe");
-    // }
-    // Check if device has been paired
-    // [DllImport(MobileDeviceLibrary)]
-    // public static extern uint AMDeviceIsPaired(IntPtr device);
-    // Get device identifier, return CFString.FromHandle (AMDeviceCopyDeviceIdentifier (device));
-    // Get UUID using AMDeviceCopyValue and "UniqueDeviceID"
-    // Get Name using AMDeviceCopyValue and "DeviceName"
-    // Add ability to pass in the deviceName to match. compare with device name.
-    // Dump info about discovered devices.
-    // AMDeviceConnect(device);
-    // assert(AMDeviceIsPaired(device));
-    // check_error(AMDeviceValidatePairing(device));
-    // check_error(AMDeviceStartSession(device));
-    // ...
-    // check_error(AMDeviceStopSession(device));
-    // check_error(AMDeviceDisconnect(device));
-
-    //https://github.com/EpicGames/UnrealEngine/blob/463443057fb97f1af0d2951705324ce8818d2a55/Engine/Extras/ThirdPartyNotUE/ios-deploy/src/ios-deploy/ios-deploy.m
+    // TODO:
+    // Redo discover connect logic, since connected devices might not be paired directly.
+    // Each discovered device gets connected and added to list of connected device.
+    // When a devce gets disconnected its removed from list and if it was selected, reset.
+    // When we need a new usbmux connection, if there is no device already selected,
+    // search list for matching device, pattern matching + ispairing, log info.
+    // if no device found, fail ubsmux connect.
+    // if we find a device, set that as selected device, device will be selected until disconnected.
+    // Fix capabilities to pass a device filter pattern when using port forwarding, maybe it should be
+    // simple as appending arguments to exising parameter, like ios,*mydevice*
 
     internal static class USBMuxInterop
     {
