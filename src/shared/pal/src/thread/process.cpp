@@ -1926,6 +1926,20 @@ public:
     }
 
 #ifdef ENABLE_RUNTIME_EVENTS_OVER_PIPES
+    #pragma push_macro("TRACE")
+    #undef TRACE
+    #define TRACE(...) do { if (logFd) { fprintf(logFd, __VA_ARGS__); fflush(logFd); } } while (0)
+
+    #define INIT_TRACE() \
+        char logFileName[MAX_DEBUGGER_TRANSPORT_PIPE_NAME_LENGTH]; \
+        snprintf(logFileName, strlen(m_startupPipeName) - strlen(RuntimeStartupPipeName), "%s", m_startupPipeName); \
+        strcat(logFileName, "log-dbg.txt"); \
+        FILE* logFd = fopen(logFileName, "w")
+
+    #define CLOSE_TRACE() do { \
+        if (logFd) { fclose(logFd); logFd = NULL; } \
+    } while (0)
+
     void StartupHelperRuntimeEventsThread()
     {
         PAL_ERROR pe = NO_ERROR;
@@ -1933,6 +1947,8 @@ public:
         int kq = -1;
         int continuePipeFd = -1;
         int startupPipeFd = -1;
+
+        INIT_TRACE();
 
 #if HAVE_KQUEUE && !HAVE_BROKEN_FIFO_KEVENT
         kq = kqueue();
@@ -2078,8 +2094,11 @@ public:
         {
             CloseFd(kq);
         }
+
+        CLOSE_TRACE();
     }
 
+    #pragma pop_macro("TRACE")
 #endif // ENABLE_RUNTIME_EVENTS_OVER_PIPES
 
     void StartupHelperThread()
