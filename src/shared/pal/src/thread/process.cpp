@@ -1933,7 +1933,7 @@ public:
     #define INIT_TRACE() \
         char logFileName[MAX_DEBUGGER_TRANSPORT_PIPE_NAME_LENGTH]; \
         snprintf(logFileName, strlen(m_startupPipeName) - strlen(RuntimeStartupPipeName), "%s", m_startupPipeName); \
-        strcat(logFileName, "log-dbg.txt"); \
+        strcat(logFileName, "-log-dbgr.txt"); \
         FILE* logFd = fopen(logFileName, "w")
 
     #define CLOSE_TRACE() do { \
