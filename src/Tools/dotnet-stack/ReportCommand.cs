@@ -27,8 +27,9 @@ namespace Microsoft.Diagnostics.Tools.Stack
         /// <param name="processId">The process to report the stack from.</param>
         /// <param name="name">The name of process to report the stack from.</param>
         /// <param name="duration">The duration of to trace the target for. </param>
+        /// <param name="frameTypes">Specify what frames to include in call stacks: all, sync, async.</param>
         /// <returns></returns>
-        private static async Task<int> Report(CancellationToken ct, TextWriter stdOutput, TextWriter stdError, int processId, string name, TimeSpan duration)
+        private static async Task<int> Report(CancellationToken ct, TextWriter stdOutput, TextWriter stdError, int processId, string name, TimeSpan duration, string frameTypes)
         {
             string tempNetTraceFilename = Path.Join(Path.GetTempPath(), Path.GetRandomFileName() + ".nettrace");
             string tempEtlxFilename = "";
@@ -115,7 +116,7 @@ namespace Microsoft.Diagnostics.Tools.Stack
 #if DEBUG
                         stdOutput.WriteLine($"Found {samples.Count} stacks for thread 0x{threadId:X}");
 #endif
-                        PrintStack(stdOutput, threadId, samples[0], stackSource);
+                        PrintStack(stdOutput, threadId, samples[0], stackSource, frameTypes);
                     }
                 }
             }
@@ -149,16 +150,117 @@ namespace Microsoft.Diagnostics.Tools.Stack
             return 0;
         }
 
-        private static void PrintStack(TextWriter stdOutput, int threadId, StackSourceSample stackSourceSample, StackSource stackSource)
+        private const string AsyncMethodbuilderCoreHelpers = "System.Runtime.CompilerServices.AsyncMethodBuilderCoreHelpers";
+        private const string AsyncContinuationChainEndFrame = AsyncMethodbuilderCoreHelpers + ".AsyncContinuationChainEnd()";
+        private const string RuntimeAsyncContinuationChainEndFrame = AsyncMethodbuilderCoreHelpers + ".RuntimeAsyncContinuationChainEnd()";
+        private const string AsyncContinuationChainStartFrame = AsyncMethodbuilderCoreHelpers + ".AsyncContinuationChainStart()";
+        private const string RuntimeAsyncContinuationChainStartFrame = AsyncMethodbuilderCoreHelpers + ".RuntimeAsyncContinuationChainStart()";
+
+        private static void PrintStack(TextWriter stdOutput, int threadId, StackSourceSample stackSourceSample, StackSource stackSource, string frameTypes)
         {
-            stdOutput.WriteLine($"Thread (0x{threadId:X}):");
-            StackSourceCallStackIndex stackIndex = stackSourceSample.StackIndex;
-            while (!stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false).StartsWith("Thread ("))
+            string prefix = "  ";
+            int frameCount = 0;
+            bool inAsyncContinuationChain = false;
+            bool includeAsyncFrames = false;
+            bool includeSyncFrames = false;
+
+            string[] frameTypesArray = frameTypes.Split('+', StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < frameTypesArray.Length; i++)
             {
-                stdOutput.WriteLine($"  {stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false)}"
-                    .Replace("UNMANAGED_CODE_TIME", "[Native Frames]"));
-                stackIndex = stackSource.GetCallerIndex(stackIndex);
+                string frameType = frameTypesArray[i].Trim().ToLowerInvariant();
+                if (frameType == "async")
+                {
+                    includeAsyncFrames = true;
+                }
+                else if (frameType == "sync")
+                {
+                    includeSyncFrames = true;
+                }
+                else if (frameType == "all")
+                {
+                    includeAsyncFrames = true;
+                    includeSyncFrames = true;
+                }
             }
+
+            stdOutput.WriteLine($"Thread (0x{threadId:X}):");
+
+            StackSourceCallStackIndex stackIndex = stackSourceSample.StackIndex;
+            string frameName = stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false);
+            while (!frameName.StartsWith("Thread ("))
+            {
+                bool dropFrame = false;
+                if (frameName.EndsWith(AsyncContinuationChainEndFrame, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (includeAsyncFrames)
+                    {
+                        stdOutput.WriteLine($"{prefix}[Async Call Stack]");
+                        prefix = "    [Async] ";
+                    }
+                    dropFrame = true;
+                    inAsyncContinuationChain = true;
+                }
+                else if (frameName.EndsWith(RuntimeAsyncContinuationChainEndFrame, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (includeAsyncFrames)
+                    {
+                        stdOutput.WriteLine($"{prefix}[Async Call Stack]");
+                        prefix = "    [Runtime Async] ";
+                    }
+                    dropFrame = true;
+                    inAsyncContinuationChain = true;
+                }
+                else if (frameName.EndsWith(AsyncContinuationChainStartFrame, StringComparison.OrdinalIgnoreCase))
+                {
+                    prefix = "  ";
+                    dropFrame = true;
+                    inAsyncContinuationChain = false;
+                }
+                else if (frameName.EndsWith(RuntimeAsyncContinuationChainStartFrame, StringComparison.OrdinalIgnoreCase))
+                {
+                    prefix = "  ";
+                    dropFrame = true;
+                    inAsyncContinuationChain = false;
+                }
+
+                if (inAsyncContinuationChain && !includeAsyncFrames)
+                {
+                    dropFrame = true;
+                }
+
+                if (!inAsyncContinuationChain && !includeSyncFrames)
+                {
+                    dropFrame = true;
+                }
+
+                if (!dropFrame)
+                {
+                    string line = $"{prefix}{frameName}";
+                    line.Replace("UNMANAGED_CODE_TIME", "[Native Frames]");
+                    stdOutput.WriteLine(line);
+                    frameCount++;
+                }
+
+                stackIndex = stackSource.GetCallerIndex(stackIndex);
+                frameName = stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false);
+            }
+
+            if (frameCount == 0)
+            {
+                if (includeAsyncFrames && !includeSyncFrames)
+                {
+                    stdOutput.WriteLine($"{prefix}[No async frames captured in this thread]");
+                }
+                else if (includeSyncFrames && !includeAsyncFrames)
+                {
+                    stdOutput.WriteLine($"{prefix}[No sync frames captured in this thread]");
+                }
+                else
+                {
+                    stdOutput.WriteLine($"{prefix}[No frames captured in this thread]");
+                }
+            }
+
             stdOutput.WriteLine();
         }
 
@@ -170,7 +272,8 @@ namespace Microsoft.Diagnostics.Tools.Stack
             {
                 ProcessIdOption,
                 NameOption,
-                DurationOption
+                DurationOption,
+                FrameTypesOption
             };
 
             reportCommand.SetAction((parseResult, ct) => Report(ct,
@@ -178,7 +281,8 @@ namespace Microsoft.Diagnostics.Tools.Stack
                 stdError: parseResult.Configuration.Error,
                 processId: parseResult.GetValue(ProcessIdOption),
                 name: parseResult.GetValue(NameOption),
-                duration: parseResult.GetValue(DurationOption)));
+                duration: parseResult.GetValue(DurationOption),
+                frameTypes: parseResult.GetValue(FrameTypesOption)));
 
             return reportCommand;
         }
@@ -201,6 +305,13 @@ namespace Microsoft.Diagnostics.Tools.Stack
             new("--name", "-n")
             {
                 Description = "The name of the process to report the stack."
+            };
+
+        public static readonly Option<string> FrameTypesOption =
+            new("--frames")
+            {
+                Description = "Specify what frames to include in call stacks: all, sync, async.",
+                DefaultValueFactory = _ => "sync"
             };
     }
 }
