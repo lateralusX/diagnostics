@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Rendering;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -22,6 +23,55 @@ namespace Microsoft.Diagnostics.Tools.Trace
     internal class CollectCommandHandler
     {
         internal bool IsQuiet { get; set; }
+
+        // The runtime EventSource that emits logical async continuation call stacks (RuntimeAsync +
+        // StateMachineAsync). Enabling it (via 'dotnet-trace collect --async') captures the data that lets
+        // async ancestry be stitched into each sample, either inline (when --format requests a non-nettrace
+        // output) or later via 'dotnet-trace convert --async'.
+        internal const string AsyncProfilerProviderName = "System.Runtime.CompilerServices.AsyncProfilerEventSource";
+
+        // Mirrors the runtime's AsyncProfilerEventSource AsyncEventKeywords (18 bits; full set == 0x3FFFF).
+        [Flags]
+        private enum AsyncEventKeywords : long
+        {
+            None = 0,
+
+            // RuntimeAsync (V2)
+            CreateRuntimeContext = 0x1,
+            ResumeRuntimeContext = 0x2,
+            SuspendRuntimeContext = 0x4,
+            CompleteRuntimeContext = 0x8,
+            UnwindRuntimeException = 0x10,
+            CreateRuntimeCallstack = 0x20,
+            ResumeRuntimeCallstack = 0x40,
+            SuspendRuntimeCallstack = 0x80,
+            ResumeRuntimeMethod = 0x100,
+            CompleteRuntimeMethod = 0x200,
+
+            // StateMachineAsync (V1)
+            CreateStateMachineContext = 0x400,
+            ResumeStateMachineContext = 0x800,
+            SuspendStateMachineContext = 0x1000,
+            CompleteStateMachineContext = 0x2000,
+            UnwindStateMachineException = 0x4000,
+            ResumeStateMachineCallstack = 0x8000,
+            ResumeStateMachineMethod = 0x10000,
+            CompleteStateMachineMethod = 0x20000,
+
+            // The bare-minimum set required to stitch async call stacks:
+            //  * per kind: the resume-callstack (the continuation frames) and the context close events
+            //    (suspend/complete) that bound each activation.
+            //  * V1 additionally needs the unwind event, because unwound frames leave the synchronous stack and
+            //    are only observable via the event; V2 recovers unwinds from the continuation-wrapper index and
+            //    builds its frames from the resume-callstack alone, so it needs neither unwind nor create-callstack.
+            //  * reset/metadata/sync-clock sub-events are not keyword-gated (they fire whenever any async keyword
+            //    is enabled), so they need no bit here.
+            // This is the mask 'collect --async' enables; to customize it, specify the provider explicitly via
+            // --providers instead.
+            DefaultAsyncProfilerMask =
+                SuspendRuntimeContext | CompleteRuntimeContext | ResumeRuntimeCallstack |
+                SuspendStateMachineContext | CompleteStateMachineContext | UnwindStateMachineException | ResumeStateMachineCallstack,
+        }
 
         public CollectCommandHandler(IConsole console = null)
         {
@@ -64,8 +114,9 @@ namespace Microsoft.Diagnostics.Tools.Trace
         /// <param name="stoppingEventPayloadFilter">A string, parsed as [payload_field_name]:[payload_field_value] pairs separated by commas, that will stop the trace upon hitting an event with a matching payload. Requires `--stopping-event-provider-name` and `--stopping-event-event-name` to be set.</param>
         /// <param name="rundown">Collect rundown events.</param>
         /// <param name="bufferingMode">The session buffering mode; Block requests non-lossy collection (requires a .NET 11+ target).</param>
+        /// <param name="asyncProfiler">Enables the runtime async-profiler provider (via --async) so async ancestry can be stitched into samples.</param>
         /// <returns></returns>
-        internal async Task<int> Collect(CancellationToken ct, CommandLineConfiguration cliConfig, int processId, FileInfo output, uint buffersize, string[] providers, string[] profile, TraceFileFormat format, TimeSpan duration, string clrevents, string clreventlevel, string name, string diagnosticPort, bool showchildio, bool resumeRuntime, string stoppingEventProviderName, string stoppingEventEventName, string stoppingEventPayloadFilter, bool? rundown, string dsrouter, EventPipeBufferingMode bufferingMode)
+        internal async Task<int> Collect(CancellationToken ct, CommandLineConfiguration cliConfig, int processId, FileInfo output, uint buffersize, string[] providers, string[] profile, TraceFileFormat format, TimeSpan duration, string clrevents, string clreventlevel, string name, string diagnosticPort, bool showchildio, bool resumeRuntime, string stoppingEventProviderName, string stoppingEventEventName, string stoppingEventPayloadFilter, bool? rundown, string dsrouter, EventPipeBufferingMode bufferingMode, bool asyncProfiler)
         {
             bool collectionStopped = false;
             bool cancelOnEnter = true;
@@ -122,6 +173,21 @@ namespace Microsoft.Diagnostics.Tools.Trace
                 }
 
                 List<EventPipeProvider> providerCollection = ProviderUtils.ComputeProviderConfig(providers, clrevents, clreventlevel, profile, !IsQuiet, "collect", Console);
+
+                if (asyncProfiler)
+                {
+                    if (providerCollection.Any(p => p.Name.Equals(AsyncProfilerProviderName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        ConsoleWriteLine($"Warning: The async-profiler provider was already specified through --providers or --profile. Ignoring --async.");
+                    }
+                    else
+                    {
+                        long asyncKeywords = (long)AsyncEventKeywords.DefaultAsyncProfilerMask;
+                        providerCollection.Add(new EventPipeProvider(AsyncProfilerProviderName, EventLevel.Informational, asyncKeywords));
+                        ConsoleWriteLine($"Enabling async-profiler provider '{AsyncProfilerProviderName}' with keywords 0x{asyncKeywords:X}.");
+                    }
+                }
+
                 if (providerCollection.Count <= 0)
                 {
                     Console.Error.WriteLine("No providers were specified to start a trace.");
@@ -457,7 +523,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
                         if (format != TraceFileFormat.NetTrace)
                         {
                             string outputFilename = TraceFileFormatConverter.GetConvertedFilename(output.FullName, outputfile: null, format);
-                            TraceFileFormatConverter.ConvertToFormat(cliConfig.Output, cliConfig.Error, format, fileToConvert: output.FullName, outputFilename);
+                            TraceFileFormatConverter.ConvertToFormat(cliConfig.Output, cliConfig.Error, format, fileToConvert: output.FullName, outputFilename, stitchAsyncCallStacks: asyncProfiler);
                         }
                     }
 
@@ -560,7 +626,8 @@ namespace Microsoft.Diagnostics.Tools.Trace
                 StoppingEventPayloadFilterOption,
                 RundownOption,
                 BufferingModeOption,
-                DSRouterOption
+                DSRouterOption,
+                AsyncOption
             };
             collectCommand.TreatUnmatchedTokensAsErrors = false; // see the logic in Program.Main that handles UnmatchedTokens
             collectCommand.Description = "Collects a diagnostic trace from a currently running process or launch a child process and trace it. Append -- to the collect command to instruct the tool to run a command and trace it immediately. When tracing a child process, the exit code of dotnet-trace shall be that of the traced process unless the trace process encounters an error.";
@@ -591,13 +658,21 @@ namespace Microsoft.Diagnostics.Tools.Trace
                                        stoppingEventPayloadFilter: parseResult.GetValue(StoppingEventPayloadFilterOption),
                                        rundown: parseResult.GetValue(RundownOption),
                                        dsrouter: parseResult.GetValue(DSRouterOption),
-                                       bufferingMode: parseResult.GetValue(BufferingModeOption));
+                                       bufferingMode: parseResult.GetValue(BufferingModeOption),
+                                       asyncProfiler: parseResult.GetValue(AsyncOption));
             });
 
             return collectCommand;
         }
 
         private const uint DefaultCircularBufferSizeInMB = 256;
+
+        private static readonly Option<bool> AsyncOption =
+            new("--async")
+            {
+                Description = $"Collects with async support: enables the runtime async-profiler EventSource ({AsyncProfilerProviderName}) to capture logical async continuation call stacks (RuntimeAsync and StateMachineAsync). The async ancestry is stitched into each sample's synchronous stack automatically when '--format' requests a non-nettrace output, or later via 'dotnet-trace convert --async'. A minimal keyword set sufficient for stitching is enabled; to customize the events emitted, specify the provider explicitly through --providers instead.",
+                Arity = ArgumentArity.Zero
+            };
 
         private static readonly Option<uint> CircularBufferOption =
             new("--buffersize")

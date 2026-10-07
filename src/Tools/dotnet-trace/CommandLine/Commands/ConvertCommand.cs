@@ -17,7 +17,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
         // The first 8 bytes of a nettrace file are the ASCII string "Nettrace"
         private static readonly byte[] NetTraceHeader = [0x4E, 0x65, 0x74, 0x74, 0x72, 0x61, 0x63, 0x65];
 
-        public static int ConvertFile(TextWriter stdOut, TextWriter stdError, FileInfo inputFilename, TraceFileFormat format, FileInfo output)
+        public static int ConvertFile(TextWriter stdOut, TextWriter stdError, FileInfo inputFilename, TraceFileFormat format, FileInfo output, bool async)
         {
             if (!Enum.IsDefined(format))
             {
@@ -34,7 +34,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
 
             if (format != TraceFileFormat.NetTrace)
             {
-                TraceFileFormatConverter.ConvertToFormat(stdOut, stdError, format, inputFilename.FullName, outputFilename);
+                TraceFileFormatConverter.ConvertToFormat(stdOut, stdError, format, inputFilename.FullName, outputFilename, stitchAsyncCallStacks: async);
                 return 0;
             }
 
@@ -101,6 +101,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
                 InputFileArgument,
                 CommonOptions.ConvertFormatOption,
                 OutputOption,
+                AsyncOption,
             };
 
             convertCommand.SetAction((parseResult, ct) => Task.FromResult(ConvertFile(
@@ -108,7 +109,8 @@ namespace Microsoft.Diagnostics.Tools.Trace
                 stdError: parseResult.Configuration.Error,
                 inputFilename: parseResult.GetValue(InputFileArgument),
                 format: parseResult.GetValue(CommonOptions.ConvertFormatOption),
-                output: parseResult.GetValue(OutputOption
+                output: parseResult.GetValue(OutputOption),
+                async: parseResult.GetValue(AsyncOption
             ))));
 
             return convertCommand;
@@ -125,6 +127,12 @@ namespace Microsoft.Diagnostics.Tools.Trace
             new("--output", "-o")
             {
                 Description = "Output filename. Extension of target format will be added.",
+            };
+
+        private static readonly Option<bool> AsyncOption =
+            new("--async")
+            {
+                Description = "Stitch the logical async continuation call stacks (RuntimeAsync and StateMachineAsync) captured from the async-profiler EventSource into each sample's synchronous stack. Requires the trace to have been collected with the async-profiler provider."
             };
     }
 }

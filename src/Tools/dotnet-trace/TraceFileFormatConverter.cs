@@ -32,7 +32,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
             return Path.ChangeExtension(outputfile, TraceFileFormatExtensions[format]);
         }
 
-        internal static void ConvertToFormat(TextWriter stdOut, TextWriter stdError, TraceFileFormat format, string fileToConvert, string outputFilename)
+        internal static void ConvertToFormat(TextWriter stdOut, TextWriter stdError, TraceFileFormat format, string fileToConvert, string outputFilename, bool stitchAsyncCallStacks = false)
         {
             switch (format)
             {
@@ -43,7 +43,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
                     stdOut.WriteLine($"Processing trace data file '{fileToConvert}' to create a new {format} file '{outputFilename}'.");
                     try
                     {
-                        Convert(format, fileToConvert, outputFilename);
+                        Convert(stdOut, format, fileToConvert, outputFilename, stitchAsyncCallStacks);
                     }
                     // TODO: On a broken/truncated trace, the exception we get from TraceEvent is a plain System.Exception type because it gets caught and rethrown inside TraceEvent.
                     // We should probably modify TraceEvent to throw a better exception.
@@ -52,7 +52,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
                         if (ex.ToString().Contains("Read past end of stream."))
                         {
                             stdOut.WriteLine("Detected a potentially broken trace. Continuing with best-efforts to convert the trace, but resulting speedscope file may contain broken stacks as a result.");
-                            Convert(format, fileToConvert, outputFilename, continueOnError: true);
+                            Convert(stdOut, format, fileToConvert, outputFilename, stitchAsyncCallStacks, continueOnError: true);
                         }
                         else
                         {
@@ -67,7 +67,7 @@ namespace Microsoft.Diagnostics.Tools.Trace
             stdOut.WriteLine("Conversion complete");
         }
 
-        private static void Convert(TraceFileFormat format, string fileToConvert, string outputFilename, bool continueOnError = false)
+        private static void Convert(TextWriter stdOut, TraceFileFormat format, string fileToConvert, string outputFilename, bool stitchAsyncCallStacks, bool continueOnError = false)
         {
             string etlxFilePath = TraceLog.CreateFromEventPipeDataFile(fileToConvert, null, new TraceLogOptions() { ContinueOnError = continueOnError });
             using (SymbolReader symbolReader = new(TextWriter.Null) { SymbolPath = SymbolPath.MicrosoftSymbolServerPath })
@@ -78,11 +78,23 @@ namespace Microsoft.Diagnostics.Tools.Trace
                     OnlyManagedCodeStacks = true // EventPipe currently only has managed code stacks.
                 };
 
-                SampleProfilerThreadTimeComputer computer = new(eventLog, symbolReader)
+                // When stitchAsyncCallStacks is set, the logical async continuation frames (RuntimeAsync /
+                // StateMachineAsync) captured by the async-profiler EventSource are stitched directly into each
+                // sample's synchronous stack (opt-in; requires async-profiler data in the trace).
+                SampleProfilerThreadTimeComputer computer = new(eventLog, symbolReader, stitchAsyncCallStacks: stitchAsyncCallStacks)
                 {
                     IncludeEventSourceEvents = false // SpeedScope handles only CPU samples, events are not supported
                 };
                 computer.GenerateThreadTimeStacks(stackSource);
+
+                // --async was requested but the trace carried no async-profiler data, so stitching was skipped and a
+                // normal conversion was produced. Warn so the empty result isn't mistaken for a stitching failure.
+                if (stitchAsyncCallStacks && !computer.AsyncStitchActive)
+                {
+                    stdOut.WriteLine("Warning: --async was specified but the trace contains no async-profiler data. " +
+                        "Collect with the async-profiler provider (e.g. 'dotnet-trace collect --async') to " +
+                        "enable async call stack stitching. Producing a normal (non-stitched) conversion.");
+                }
 
                 switch (format)
                 {
